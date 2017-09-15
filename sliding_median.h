@@ -36,7 +36,7 @@ template<typename Any> Any SlidingMedian<Any>::get()
   if(change)
   {
     std::deque<Any> d(*this);
-    std::sort(d.begin(). d.end());
+    std::sort(d.begin(), d.end());
     mediane = *(d.begin() + d.size() / 2);
   }
   return mediane;
