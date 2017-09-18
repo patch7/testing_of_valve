@@ -42,9 +42,9 @@ static uint8_t  percent     = 0;
 
 mode m = manual;
 
-SlidingMedian<uint16_t> SMCurIn(9);
-SlidingMedian<uint16_t> SMCurOut(9);
-SlidingMedian<uint16_t> SMFill(9);
+SlidingMedian<uint16_t> SMCurIn(7);
+SlidingMedian<uint16_t> SMCurOut(7);
+SlidingMedian<uint16_t> SMFill(7);
 
 void RccBusConfig();
 void DMAofADCinit();
@@ -56,9 +56,9 @@ void main()
 {
   RccBusConfig();
 
-  GPIO_DeInit(GPIOA);//CAN1, ADC3_ch_1
+  GPIO_DeInit(GPIOA);//CAN1, ADC3_ch_1 (токовый)
   GPIO_DeInit(GPIOB);//TIM4(PWM), CAN2
-  GPIO_DeInit(GPIOC);//ADC3_ch_10, ADC3_ch_11
+  GPIO_DeInit(GPIOC);//ADC3_ch_10 (11), ADC3_ch_11 (29)
 
   ADC_DeInit();
   DMA_DeInit(DMA2_Stream0);
@@ -308,7 +308,14 @@ void TIMinit()
 }
 
 
-
+void ReinitializeTIM()
+{
+  TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStruct;
+  TIM_TimeBaseStructInit(&TIM_TimeBaseInitStruct);
+  TIM_TimeBaseInitStruct.TIM_Prescaler = 840;
+  TIM_TimeBaseInitStruct.TIM_Period    = freqt / freq;
+  TIM_TimeBaseInit(TIM4, &TIM_TimeBaseInitStruct);
+}
 
 void SetNextFreq(uint8_t& cnt)
 {
@@ -316,12 +323,7 @@ void SetNextFreq(uint8_t& cnt)
   if(cnt == amount && (freq += stepf) <= maxf) 
   {
     //без переинициализации сбиваются настройки
-    TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStruct;
-    TIM_TimeBaseStructInit(&TIM_TimeBaseInitStruct);
-    TIM_TimeBaseInitStruct.TIM_Prescaler = 840;
-    TIM_TimeBaseInitStruct.TIM_Period    = freqt / freq;
-    TIM_TimeBaseInit(TIM4, &TIM_TimeBaseInitStruct);
-
+    ReinitializeTIM();
     count = time * freq;
     cnt   = 0;
   }
@@ -343,9 +345,8 @@ void AutoState()
   {
     TIM_SetCompare1(TIM4, (uint32_t)(i * ((double)(freqt / freq) / count)));
 
-    if(i == (count - (uint16_t)(count * percent / 100)))
+    if(i++ == (count - (uint16_t)(count * percent / 100)))
       flag = true;
-    ++i;//!!!
   }
   else
   {
@@ -374,10 +375,8 @@ void AutoStateMaxCurrent()
       TIM_SetCompare1(TIM4, (uint32_t)(freqt / freq));
       flagm = true;
     }
-
-    if(i == (uint16_t)(count * 0.1))
+    if(i++ == (uint16_t)(count * 0.1))
       flag = true;
-    ++i;
   }
   else
   {
@@ -481,12 +480,7 @@ extern "C"
         amount  = RxMessage.Data[5];
 
         //без переинициализации сбиваются настройки
-        TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStruct;
-        TIM_TimeBaseStructInit(&TIM_TimeBaseInitStruct);
-        TIM_TimeBaseInitStruct.TIM_Prescaler = 840;
-        TIM_TimeBaseInitStruct.TIM_Period    = freqt / freq;
-        TIM_TimeBaseInit(TIM4, &TIM_TimeBaseInitStruct);
-
+        ReinitializeTIM();
         count = time * freq;
       }
     }
