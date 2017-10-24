@@ -40,11 +40,13 @@ static uint8_t  stepf       = 0;
 static uint8_t  amount      = 1;
 static uint8_t  percent     = 0;
 
+uint16_t Table[200] = {0};
+
 mode m = manual;
 
-SlidingMedian<uint16_t> SMCurIn(7);
-SlidingMedian<uint16_t> SMCurOut(7);
-SlidingMedian<uint16_t> SMFill(7);
+SlidingMedian<uint16_t> SMCurIn(3);
+SlidingMedian<uint16_t> SMCurOut(3);
+SlidingMedian<uint16_t> SMFill(3);
 
 void RccBusConfig();
 void DMAofADCinit();
@@ -54,6 +56,17 @@ void TIMinit();
 
 void main()
 {
+  for(uint8_t i = 0; i < sizeof(Table) / sizeof(*Table); ++i)
+  {
+    if(i < 20)
+      Table[i] = 1000;
+    else if(i == 20)
+      Table[i] = 105;
+    else
+      Table[i] = Table[i -1] + 5;
+  }
+
+
   RccBusConfig();
 
   GPIO_DeInit(GPIOA);//CAN1, ADC3_ch_1 (токовый)
@@ -277,7 +290,7 @@ void TIMinit()
   TIM_TimeBaseInitStruct.TIM_Period = 160;
   TIM_TimeBaseInit(TIM4, &TIM_TimeBaseInitStruct);
 
-  TIM_TimeBaseInitStruct.TIM_Period = 1000;// 10 мс
+  TIM_TimeBaseInitStruct.TIM_Period = 500;// 5 мс
   TIM_TimeBaseInit(TIM2, &TIM_TimeBaseInitStruct);
 
   TIM_SetCounter(TIM2, 0);
@@ -290,7 +303,7 @@ void TIMinit()
   TIM_OC1Init(TIM4, &TIM_OCInitStruct);
 
   //Настройка TIM2 ОС2 для сканирования АЦП по прерыванию. Настройка GPIOх ненужна
-  TIM_OCInitStruct.TIM_Pulse = 500;//в 2 раза быстрее TIM2
+  TIM_OCInitStruct.TIM_Pulse = 250;//в 2 раза быстрее TIM2
   //TIM_OCInitStruct.TIM_OCPolarity = TIM_OCPolarity_Low;
   TIM_OC2Init(TIM2, &TIM_OCInitStruct);
 
@@ -395,7 +408,21 @@ void AutoStateMaxCurrent()
   }
 }
 
+void ProportionalSet()
+{
+  static uint16_t count = 0;
 
+  if(PropState)
+  {
+    if(count != sizeof(Table) / sizeof(*Table))
+      TIM_SetCompare1(TIM4, (uint32_t)Table[count++]);
+    else
+    {
+      count = 0;
+      PropState = false;
+    }
+  }
+}
 
 
 extern "C"
@@ -459,6 +486,8 @@ extern "C"
     TxMessage.Data[6] = stepf;
     TxMessage.Data[7] = amount;
     CAN_Transmit(CAN2, &TxMessage);
+
+    ProportionalSet();
   }
 
   //Для взаимодействия с оператором вводится обработка принимаемых сообщений.
@@ -483,6 +512,10 @@ extern "C"
         ReinitializeTIM();
         count = time * freq;
       }
+      else if(RxMessage.StdId == 0x010)
+        PropState = true;
+      else if(RxMessage.StdId == 0x011)
+        TIM_SetCompare1(TIM4, 0);
     }
   }
 }
