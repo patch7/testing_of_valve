@@ -22,7 +22,7 @@
 #include "stm32f4xx_tim.h"
 #include "sliding_median.h"
 
-enum mode{manual, max_cur, auto_p, auto_d};
+enum mode{manual, max_cur, auto_p, auto_d, idle};
 
 #define in_current  ADCValue[0]
 #define out_current ADCValue[1]
@@ -39,7 +39,9 @@ static uint8_t  time        = 0;
 static uint8_t  stepf       = 0;
 static uint8_t  amount      = 1;
 static uint8_t  percent     = 0;
+static uint8_t  timecur     = 0;
 
+bool PropState = false, StepState = false;
 uint16_t Table[200] = {0};
 
 mode m = manual;
@@ -66,7 +68,6 @@ void main()
       Table[i] = Table[i -1] + 5;
   }
 
-
   RccBusConfig();
 
   GPIO_DeInit(GPIOA);//CAN1, ADC3_ch_1 (токовый)
@@ -92,7 +93,6 @@ void main()
   while(true)
     __NOP();
 }
-
 //Настройка ядра и всей переферии на максимальные частоты от HSE 8 Mhz
 void RccBusConfig()
 {
@@ -122,7 +122,6 @@ void RccBusConfig()
     while(RCC_GetSYSCLKSource() != 8) {}
   }
 }
-
 //Настройка модуля DMA2 для автоматической обработки каналов АЦП3
 void DMAofADCinit()
 {
@@ -154,7 +153,6 @@ void DMAofADCinit()
   NVIC_InitStruct.NVIC_IRQChannelCmd                = ENABLE;
   NVIC_Init(&NVIC_InitStruct);
 }
-
 /******************************************************************************
 Настройка АЦП3, каналы 1, 10, 11 на преобразование по прерыванию таймера 2 канала 2. Прерывание по спаду и нарастанию. Это необходимо для улучшения отклика системы на управление и фильтрации шумов сигнала.
 ******************************************************************************/
@@ -198,7 +196,6 @@ void ADCinit()
   ADC_Cmd(ADC3, ENABLE);
   ADC_SoftwareStartConv(ADC3);
 }
-
 //Настройка модуля CAN.
 void CANinit()
 {
@@ -259,7 +256,6 @@ void CANinit()
 
   CAN_ITConfig(CAN2, CAN_IT_FMP0, ENABLE);
 }
-
 /******************************************************************************
 Настройка TIM2 для отправки по CAN: сообщений - заполнение, ток, частоту, время заполнения в авто управлении, режим работы, процент пропуска верхнего предела тока, шаг частоты в авто управлении, количество выборок на каджой частоте; прерывания по спаду и фронту для обработки с помощью DMA каналов АЦП и чтобы за время прерывания таймера 2 успел заполниться класс фильтра.
 Настройка TIM4 OC1 для ШИМ, прерывание по переполнению.
@@ -320,7 +316,6 @@ void TIMinit()
   NVIC_EnableIRQ(TIM4_IRQn);
 }
 
-
 void ReinitializeTIM()
 {
   TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStruct;
@@ -329,7 +324,6 @@ void ReinitializeTIM()
   TIM_TimeBaseInitStruct.TIM_Period    = freqt / freq;
   TIM_TimeBaseInit(TIM4, &TIM_TimeBaseInitStruct);
 }
-
 void SetNextFreq(uint8_t& cnt)
 {
   //частота увеличивается в условии, при изменении кода быть внимательнее!!!
@@ -343,11 +337,11 @@ void SetNextFreq(uint8_t& cnt)
   else if(freq > maxf)
   {
     freq = minf;
-    m    = manual;
+    m    = idle;
     cnt  = 0;
+    TIM_SetCompare1(TIM4, 0);
   }
 }
-
 void AutoState()
 {
   static uint16_t i    = 0;
@@ -373,7 +367,6 @@ void AutoState()
     SetNextFreq(cnt);
   }
 }
-
 void AutoStateMaxCurrent()
 {
   static uint16_t i     = 0;
@@ -407,21 +400,33 @@ void AutoStateMaxCurrent()
     SetNextFreq(cnt);
   }
 }
-
 void ProportionalSet()
 {
-  static uint16_t count = 0;
-
-  if(PropState)
+  static uint16_t mycount = 0;
+  if(mycount != sizeof(Table) / sizeof(*Table))
+    TIM_SetCompare1(TIM4, Table[mycount++]);
+  else
   {
-    if(count != sizeof(Table) / sizeof(*Table))
-      TIM_SetCompare1(TIM4, (uint32_t)Table[count++]);
-    else
-    {
-      count = 0;
-      PropState = false;
-    }
+    mycount = 0;
+    PropState = false;
   }
+}
+void StepSetCurrent()
+{
+  static uint16_t mycount = 0;
+  static uint16_t pwm = 8;
+  if(!(mycount % (20 + (20 * timecur))))
+  {
+    TIM_SetCompare1(TIM4, pwm);
+    pwm += 8;
+  }
+  if(mycount == 2520*(timecur+1))
+  {
+    mycount = 0;
+    pwm = 8;
+    StepState = false;
+  }
+  ++mycount;
 }
 
 
@@ -438,14 +443,12 @@ extern "C"
       SMFill.push(filling);
     }
   }
-
   /****************************************************************************
   Реализованно 4 режима управления ШИМ сигналом:
   1. Ручной - коэффициент заполнения регулируется с помощью потенциометра.
   2. Автоматическое пропорциональное управление - заполнение ШИМ за определенное (заданное оператором) время, частота изменяется с заданым шагом и проходит заданое число выборок. Так же есть возможность ограничить верхний предел тока в процентах.
   3. Максимальный ток - выставляется максимальный ток на клапане.
   4. Автоматическое дискретное управление - выставляется максимальный ток на заданное время, с заданым числом выборок. Частота изменяется с заданым шагом.
-  Изменение длительности импульса внутри прерывания сделано, чтобы сигнал изменялся в конце импульса и соответственно изменение было не заметено.
   ****************************************************************************/
   void TIM4_IRQHandler()
   {
@@ -459,37 +462,33 @@ extern "C"
       TIM_SetCompare1(TIM4, (uint32_t)(freqt / freq));
     else if(m == auto_d)
       AutoStateMaxCurrent();
+    else if(m == idle);
   }
-
   //Для контроля параметров, данные выводятся через CAN.
   void TIM2_IRQHandler()
   {
     TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
-
-    uint16_t in_cur  = SMCurIn.get();
-    uint16_t out_cur = SMCurOut.get();
-    uint16_t fill    = SMFill.get();
-
     CanTxMsg TxMessage;
-
     TxMessage.StdId = 0x002;
     TxMessage.RTR   = CAN_RTR_DATA;
     TxMessage.IDE   = CAN_ID_STD;
     TxMessage.DLC   = 8;
 
-    TxMessage.Data[0] = static_cast<uint8_t>(freq    / 10);
-    TxMessage.Data[1] = static_cast<uint8_t>(in_cur  / 16.25);// 4095/16.25=252
-    TxMessage.Data[2] = static_cast<uint8_t>(out_cur / 16.25);
-    TxMessage.Data[3] = static_cast<uint8_t>(fill    / 16.25);
+    TxMessage.Data[0] = static_cast<uint8_t>(freq           / 10);
+    TxMessage.Data[1] = static_cast<uint8_t>(SMCurIn.get()  / 16.25);// 4095/16.25=252
+    TxMessage.Data[2] = static_cast<uint8_t>(SMCurOut.get() / 16.25);
+    TxMessage.Data[3] = static_cast<uint8_t>(SMFill.get()   / 16.25);
     TxMessage.Data[4] = percent;
     TxMessage.Data[5] = time;
     TxMessage.Data[6] = stepf;
     TxMessage.Data[7] = amount;
     CAN_Transmit(CAN2, &TxMessage);
 
-    ProportionalSet();
+    if(PropState)
+      ProportionalSet();
+    if(StepState)
+      StepSetCurrent();
   }
-
   //Для взаимодействия с оператором вводится обработка принимаемых сообщений.
   void CAN2_RX0_IRQHandler(void)
   {
@@ -503,11 +502,11 @@ extern "C"
       {
         freq    = RxMessage.Data[0] * 10;
         time    = RxMessage.Data[1];
-        m       = static_cast<mode>(RxMessage.Data[2]);//chek!!!!!!!!!!!!!!!!!!
+        m       = static_cast<mode>(RxMessage.Data[2]);
         percent = RxMessage.Data[3];
         stepf   = RxMessage.Data[4];
         amount  = RxMessage.Data[5];
-
+        timecur = RxMessage.Data[6];
         //без переинициализации сбиваются настройки
         ReinitializeTIM();
         count = time * freq;
@@ -516,6 +515,8 @@ extern "C"
         PropState = true;
       else if(RxMessage.StdId == 0x011)
         TIM_SetCompare1(TIM4, 0);
+      else if(RxMessage.StdId == 0x012)
+        StepState = true;
     }
   }
 }
