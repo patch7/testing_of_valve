@@ -29,7 +29,7 @@ enum mode{manual, max_cur, auto_p, auto_d, idle};
 #define filling     ADCValue[2]
 
 const static uint32_t freqt = 100000;
-const static uint16_t maxf  = 500;
+const static uint16_t maxf  = 450;
 const static uint16_t minf  = 100;
 
 static uint16_t ADCValue[3] = {0};
@@ -43,12 +43,13 @@ static uint8_t  timecur     = 0;
 
 bool PropState = false, StepState = false;
 uint16_t Table[200] = {0};
+uint32_t time_count = 0;
 
 mode m = manual;
 
-SlidingMedian<uint16_t> SMCurIn(3);
-SlidingMedian<uint16_t> SMCurOut(3);
-SlidingMedian<uint16_t> SMFill(3);
+SlidingMedian<uint16_t> SMCurIn(7);
+SlidingMedian<uint16_t> SMCurOut(7);
+SlidingMedian<uint16_t> SMFill(7);
 
 void RccBusConfig();
 void DMAofADCinit();
@@ -286,7 +287,7 @@ void TIMinit()
   TIM_TimeBaseInitStruct.TIM_Period = 160;
   TIM_TimeBaseInit(TIM4, &TIM_TimeBaseInitStruct);
 
-  TIM_TimeBaseInitStruct.TIM_Period = 500;// 5 мс
+  TIM_TimeBaseInitStruct.TIM_Period = 100;// 1 мс
   TIM_TimeBaseInit(TIM2, &TIM_TimeBaseInitStruct);
 
   TIM_SetCounter(TIM2, 0);
@@ -299,7 +300,7 @@ void TIMinit()
   TIM_OC1Init(TIM4, &TIM_OCInitStruct);
 
   //Настройка TIM2 ОС2 для сканирования АЦП по прерыванию. Настройка GPIOх ненужна
-  TIM_OCInitStruct.TIM_Pulse = 250;//в 2 раза быстрее TIM2
+  TIM_OCInitStruct.TIM_Pulse = 50;//в 2 раза быстрее TIM2
   //TIM_OCInitStruct.TIM_OCPolarity = TIM_OCPolarity_Low;
   TIM_OC2Init(TIM2, &TIM_OCInitStruct);
 
@@ -468,26 +469,39 @@ extern "C"
   void TIM2_IRQHandler()
   {
     TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
-    CanTxMsg TxMessage;
-    TxMessage.StdId = 0x002;
-    TxMessage.RTR   = CAN_RTR_DATA;
-    TxMessage.IDE   = CAN_ID_STD;
-    TxMessage.DLC   = 8;
 
-    TxMessage.Data[0] = static_cast<uint8_t>(freq           / 10);
-    TxMessage.Data[1] = static_cast<uint8_t>(SMCurIn.get()  / 16.25);// 4095/16.25=252
-    TxMessage.Data[2] = static_cast<uint8_t>(SMCurOut.get() / 16.25);
-    TxMessage.Data[3] = static_cast<uint8_t>(SMFill.get()   / 16.25);
-    TxMessage.Data[4] = percent;
-    TxMessage.Data[5] = time;
-    TxMessage.Data[6] = stepf;
-    TxMessage.Data[7] = amount;
-    CAN_Transmit(CAN2, &TxMessage);
+    ++time_count;
 
-    if(PropState)
-      ProportionalSet();
-    if(StepState)
-      StepSetCurrent();
+    if(!(time_count % 5))
+    {
+      CanTxMsg TxMessage;
+      TxMessage.StdId   = 0x002;
+      TxMessage.RTR     = CAN_RTR_DATA;
+      TxMessage.IDE     = CAN_ID_STD;
+      TxMessage.DLC     = 6;
+      TxMessage.Data[0] = static_cast<uint8_t>(freq / 10);
+      TxMessage.Data[1] = time;
+      TxMessage.Data[2] = static_cast<uint8_t>(m);
+      TxMessage.Data[3] = percent;
+      TxMessage.Data[4] = stepf;
+      TxMessage.Data[5] = amount;
+      CAN_Transmit(CAN2, &TxMessage);
+
+      TxMessage.StdId   = 0x003;
+      TxMessage.DLC     = 6;
+      TxMessage.Data[0] = static_cast<uint8_t>(SMCurOut.get());
+      TxMessage.Data[1] = static_cast<uint8_t>(SMCurOut.get() >> 8);
+      TxMessage.Data[2] = static_cast<uint8_t>(SMCurIn.get());
+      TxMessage.Data[3] = static_cast<uint8_t>(SMCurIn.get()  >> 8);
+      TxMessage.Data[4] = static_cast<uint8_t>(SMFill.get());
+      TxMessage.Data[5] = static_cast<uint8_t>(SMFill.get()   >> 8);
+      CAN_Transmit(CAN2, &TxMessage);
+
+      if(PropState)
+        ProportionalSet();
+      if(StepState)
+        StepSetCurrent();
+    }
   }
   //Для взаимодействия с оператором вводится обработка принимаемых сообщений.
   void CAN2_RX0_IRQHandler(void)
