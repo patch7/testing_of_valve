@@ -34,6 +34,8 @@ const static uint16_t maxf  = 400;
 const static uint16_t minf  = 100;
 
 static uint16_t ADCValue[4] = {0};
+static uint16_t ADCDith[2]  = {0};
+
 static uint16_t freq        = minf;
 static uint16_t count       = 0;
 static uint8_t  time        = 2;
@@ -46,17 +48,9 @@ bool PropState = false, StepState = false;
 bool Reverse = false;
 
 uint16_t Table[200] = {0};
-uint16_t DTable[125] = {0,    14,   27,   41,   54,   68,   81,   95,   108,  122,  135,  149,
-                        163,  176,  190,  203,  217,  230,  244,  257,  271,  285,  298,  312,
-                        325,  339,  352,  366,  379,  393,  406,  420,  434,  447,  461,  474,
-                        488,  501,  515,  528,  542,  555,  569,  583,  596,  610,  623,  637,
-                        650,  664,  677,  691,  705,  718,  732,  745,  759,  772,  786,  799,
-                        813,  826,  840,  854,  867,  881,  894,  908,  921,  935,  948,  962,
-                        975,  989,  1003, 1016, 1030, 1043, 1057, 1070, 1084, 1097, 1111, 1125,
-                        1138, 1152, 1165, 1179, 1192, 1206, 1219, 1233, 1246, 1260, 1274, 1287,
-                        1301, 1314, 1328, 1341, 1355, 1368, 1382, 1395, 1409, 1423, 1436, 1450,
-                        1463, 1477, 1490, 1504, 1517, 1531, 1545, 1558, 1572, 1585, 1599, 1612,
-                        1626, 1639, 1653, 1666, 1680};
+uint16_t DTable[25] = {0,    70,   140,  210,  280,  350,  420,  490,  560,  630,  700,  770,
+                       840,  910,  980,  1050, 1120, 1190, 1260, 1330, 1400, 1470, 1540, 1610,
+                       1680};
 uint32_t time_count = 0;
 
 mode m = manual;
@@ -65,6 +59,7 @@ SlidingMedian<uint16_t> SMCurIn(7);
 SlidingMedian<uint16_t> SMCurOut(7);
 SlidingMedian<uint16_t> SMFill(7);
 SlidingMedian<uint16_t> SMPress(7);
+SlidingMedian<uint16_t> SMDith(7);
 
 void RccBusConfig();
 void DMAofADCinit();
@@ -143,11 +138,11 @@ void RccBusConfig()
 void DMAofADCinit()
 {
   DMA_DeInit(DMA2_Stream0);
+  DMA_DeInit(DMA2_Stream2);
   RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_DMA2, ENABLE);
 
   DMA_InitTypeDef DMA_InitStruct;
   DMA_StructInit(&DMA_InitStruct);
-
   DMA_InitStruct.DMA_Channel            = DMA_Channel_2;
   DMA_InitStruct.DMA_PeripheralBaseAddr = (uint32_t)&(ADC3->DR);
   DMA_InitStruct.DMA_Memory0BaseAddr    = (uint32_t)ADCValue;
@@ -159,16 +154,27 @@ void DMAofADCinit()
   DMA_InitStruct.DMA_FIFOThreshold      = DMA_FIFOThreshold_HalfFull;
   DMA_Init(DMA2_Stream0, &DMA_InitStruct);
 
-  DMA_ITConfig(DMA2_Stream0, DMA_IT_TC, ENABLE);//если прерывание ненадо, можно ли убрать
-  DMA_Cmd(DMA2_Stream0, ENABLE);
+  DMA_InitStruct.DMA_Channel            = DMA_Channel_1;
+  DMA_InitStruct.DMA_PeripheralBaseAddr = (uint32_t)&(ADC2->DR);
+  DMA_InitStruct.DMA_Memory0BaseAddr    = (uint32_t)ADCDith;
+  DMA_InitStruct.DMA_BufferSize         = 1;
+  DMA_Init(DMA2_Stream2, &DMA_InitStruct);
 
-  //Настройка прерывания, без него не работает!
-  NVIC_InitTypeDef NVIC_InitStruct;
+  DMA_ITConfig(DMA2_Stream0, DMA_IT_TC, ENABLE);//если прерывание ненадо, можно ли убрать
+  DMA_ITConfig(DMA2_Stream2, DMA_IT_TC, ENABLE);//если прерывание ненадо, можно ли убрать
+
+  NVIC_InitTypeDef NVIC_InitStruct;//Настройка прерывания, без него не работает!
   NVIC_InitStruct.NVIC_IRQChannel                   = DMA2_Stream0_IRQn;
   NVIC_InitStruct.NVIC_IRQChannelPreemptionPriority = 0x0;
   NVIC_InitStruct.NVIC_IRQChannelSubPriority        = 0x0;
   NVIC_InitStruct.NVIC_IRQChannelCmd                = ENABLE;
   NVIC_Init(&NVIC_InitStruct);
+
+  NVIC_InitStruct.NVIC_IRQChannel                   = DMA2_Stream2_IRQn;
+  NVIC_Init(&NVIC_InitStruct);
+
+  DMA_Cmd(DMA2_Stream0, ENABLE);
+  DMA_Cmd(DMA2_Stream2, ENABLE);
 }
 /******************************************************************************
 Настройка АЦП3, каналы 1, 10, 11 на преобразование по прерыванию таймера 2 канала 2. Прерывание по спаду и нарастанию. Это необходимо для улучшения отклика системы на управление и фильтрации шумов сигнала.
@@ -176,6 +182,7 @@ void DMAofADCinit()
 void ADCinit()
 {
   ADC_DeInit();
+  RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC2, ENABLE);
   RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC3, ENABLE);
 
   GPIO_InitTypeDef GPIO_InitStruct;
@@ -186,6 +193,9 @@ void ADCinit()
   GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_AN;
   GPIO_InitStruct.GPIO_Speed = GPIO_High_Speed;
   GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_0;//ток на клапане с дизерингом
+  GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_1;//Ток на клапане
   GPIO_Init(GPIOA, &GPIO_InitStruct);
@@ -206,15 +216,24 @@ void ADCinit()
   ADC_InitStruct.ADC_NbrOfConversion      = 4;
   ADC_Init(ADC3, &ADC_InitStruct);
 
+  ADC_InitStruct.ADC_NbrOfConversion      = 1;
+  ADC_Init(ADC2, &ADC_InitStruct);
+
   ADC_RegularChannelConfig(ADC3, ADC_Channel_1,  1, ADC_SampleTime_480Cycles);
   ADC_RegularChannelConfig(ADC3, ADC_Channel_10, 2, ADC_SampleTime_480Cycles);
   ADC_RegularChannelConfig(ADC3, ADC_Channel_11, 3, ADC_SampleTime_480Cycles);
   ADC_RegularChannelConfig(ADC3, ADC_Channel_5,  4, ADC_SampleTime_480Cycles);
 
+  ADC_RegularChannelConfig(ADC2, ADC_Channel_8,  1, ADC_SampleTime_480Cycles);
+
   //Запрос после последней передачи, без него не работает
+  ADC_DMARequestAfterLastTransferCmd(ADC2, ENABLE);
   ADC_DMARequestAfterLastTransferCmd(ADC3, ENABLE);
+  ADC_DMACmd(ADC2, ENABLE);
   ADC_DMACmd(ADC3, ENABLE);
+  ADC_Cmd(ADC2, ENABLE);
   ADC_Cmd(ADC3, ENABLE);
+  ADC_SoftwareStartConv(ADC2);
   ADC_SoftwareStartConv(ADC3);
 }
 //Настройка модуля CAN.
@@ -303,8 +322,8 @@ void TIMinit()
 
   TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStruct;
   TIM_TimeBaseStructInit(&TIM_TimeBaseInitStruct);
-  TIM_TimeBaseInitStruct.TIM_Prescaler = 0;//всегда +1
-  TIM_TimeBaseInitStruct.TIM_Period    = 1680;//200 Gz на 250 точек
+  TIM_TimeBaseInitStruct.TIM_Prescaler = 99;//всегда +1
+  TIM_TimeBaseInitStruct.TIM_Period    = 1680;//10 Гц на 50 точек, несущая частота 500 Гц
   TIM_TimeBaseInit(TIM3, &TIM_TimeBaseInitStruct);
 
   TIM_TimeBaseInitStruct.TIM_Prescaler = 839;//всегда +1
@@ -475,11 +494,28 @@ extern "C"
   {
     if(DMA_GetITStatus(DMA2_Stream0, DMA_IT_TCIF0))
     {
-      DMA_ClearITPendingBit(DMA2_Stream0,DMA_IT_TCIF0);
+      DMA_ClearITPendingBit(DMA2_Stream0, DMA_IT_TCIF0);
       SMCurIn.push(in_current);
       SMCurOut.push(out_current);
       SMFill.push(filling);
       SMPress.push(pressure);
+    }
+  }
+  void DMA2_Stream2_IRQHandler()
+  {
+    if(DMA_GetITStatus(DMA2_Stream2, DMA_IT_TCIF2))
+    {
+      DMA_ClearITPendingBit(DMA2_Stream2, DMA_IT_TCIF2);
+      CanTxMsg TxMessage;
+      TxMessage.RTR     = CAN_RTR_DATA;
+      TxMessage.IDE     = CAN_ID_STD;
+      TxMessage.DLC     = 2;
+      TxMessage.StdId   = 0x010;
+      TxMessage.Data[0] = static_cast<uint8_t>(ADCDith[0]);
+      TxMessage.Data[1] = static_cast<uint8_t>(ADCDith[0] >> 8);
+      while(!CanTxMailBox_IsEmpty(CAN2));
+      CAN_Transmit(CAN2, &TxMessage);
+      //SMDith.push(ADCDith[0]);
     }
   }
   /****************************************************************************
@@ -511,7 +547,7 @@ extern "C"
     if(!Reverse)
     {
       TIM_SetCompare1(TIM3, DTable[myc++]);
-      if(myc == 125)
+      if(myc == 25)
         Reverse = true;
     }
     else
