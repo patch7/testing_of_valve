@@ -21,39 +21,15 @@
 #include "stm32f4xx_dma.h"
 #include "stm32f4xx_tim.h"
 #include "sliding_median.h"
-
-enum mode{manual, max_cur, auto_p, auto_d, idle};
+#include "testingvalve.h"
 
 #define in_current  ADCValue[0]
 #define out_current ADCValue[1]
 #define filling     ADCValue[2]
 #define pressure    ADCValue[3]
 
-const static uint32_t freqt = 100000;
-const static uint16_t maxf  = 400;
-const static uint16_t minf  = 100;
-
 static uint16_t ADCValue[4] = {0};
-static uint16_t ADCDith[2]  = {0};
-
-static uint16_t freq        = minf;
-static uint16_t count       = 0;
-static uint8_t  time        = 2;
-static uint8_t  stepf       = 25;
-static uint8_t  amount      = 2;
-static uint8_t  percent     = 0;
-static uint8_t  timecur     = 0;
-
-bool PropState = false, StepState = false;
-bool Reverse = false;
-
-uint16_t Table[200] = {0};
-uint16_t DTable[25] = {0,    70,   140,  210,  280,  350,  420,  490,  560,  630,  700,  770,
-                       840,  910,  980,  1050, 1120, 1190, 1260, 1330, 1400, 1470, 1540, 1610,
-                       1680};
-uint32_t time_count = 0;
-
-mode m = manual;
+static uint16_t ADCDith[1]  = {0};
 
 SlidingMedian<uint16_t> SMCurIn(7);
 SlidingMedian<uint16_t> SMCurOut(7);
@@ -61,42 +37,29 @@ SlidingMedian<uint16_t> SMFill(7);
 SlidingMedian<uint16_t> SMPress(7);
 SlidingMedian<uint16_t> SMDith(7);
 
+uint32_t time_count = 0;
+
+TestingValve test;
+uint8_t  timecur = 0;
+bool PropState = false, StepState = false;
+
 void RccBusConfig();
 void DMAofADCinit();
 void ADCinit();
 void CANinit();
 void TIMinit();
-bool CanTxMailBox_IsEmpty(CAN_TypeDef*);
 
 void main()
 {
-  for(uint8_t i = 0; i < sizeof(Table) / sizeof(*Table); ++i)
-  {
-    if(i < 20)
-      Table[i] = 1000;
-    else if(i == 20)
-      Table[i] = 105;
-    else
-      Table[i] = Table[i -1] + 5;
-  }
-
-  RccBusConfig();
-
   GPIO_DeInit(GPIOA);//CAN1, ADC3_ch_1 (токовый)
   GPIO_DeInit(GPIOB);//TIM4(PWM), CAN2
   GPIO_DeInit(GPIOC);//ADC3_ch_10 (11), ADC3_ch_11 (29)
-
-  ADC_DeInit();
-  DMA_DeInit(DMA2_Stream0);
-  CAN_DeInit(CAN1);
-  CAN_DeInit(CAN2);
-  TIM_DeInit(TIM2);
-  TIM_DeInit(TIM4);
 
   RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
   RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
   RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC, ENABLE);
 
+  RccBusConfig();
   DMAofADCinit();
   ADCinit();
   CANinit();
@@ -105,8 +68,7 @@ void main()
   while(true)
     __NOP();
 }
-//Настройка ядра и всей переферии на максимальные частоты от HSE 8 Mhz
-void RccBusConfig()
+void RccBusConfig()//Настройка ядра и всей переферии на максимальные частоты от HSE 8 Mhz
 {
   SystemInit();
   SystemCoreClockUpdate();
@@ -134,8 +96,7 @@ void RccBusConfig()
     while(RCC_GetSYSCLKSource() != 8) {}
   }
 }
-//Настройка модуля DMA2 для автоматической обработки каналов АЦП3
-void DMAofADCinit()
+void DMAofADCinit()//Настройка модуля DMA2 для автоматической обработки каналов АЦП3
 {
   DMA_DeInit(DMA2_Stream0);
   DMA_DeInit(DMA2_Stream2);
@@ -176,10 +137,7 @@ void DMAofADCinit()
   DMA_Cmd(DMA2_Stream0, ENABLE);
   DMA_Cmd(DMA2_Stream2, ENABLE);
 }
-/******************************************************************************
-Настройка АЦП3, каналы 1, 10, 11 на преобразование по прерыванию таймера 2 канала 2. Прерывание по спаду и нарастанию. Это необходимо для улучшения отклика системы на управление и фильтрации шумов сигнала.
-******************************************************************************/
-void ADCinit()
+void ADCinit()//Настройка АЦП2 и АЦП3, преобразование по таймеру 2 по спаду и нарастанию ШИМ
 {
   ADC_DeInit();
   RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC2, ENABLE);
@@ -188,19 +146,18 @@ void ADCinit()
   GPIO_InitTypeDef GPIO_InitStruct;
   GPIO_StructInit(&GPIO_InitStruct);
 
-  //Ручное заполнение и ток на клапане с внешнего шунта
-  GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_0 | GPIO_Pin_1;
+  GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_0 | GPIO_Pin_1;//Ручное заполнение и ток с внешнего шунта
   GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_AN;
   GPIO_InitStruct.GPIO_Speed = GPIO_High_Speed;
   GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_0;//ток на клапане с дизерингом
+  GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_0;//Ток с дизерингом
   GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_1;//Ток на клапане
+  GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_1;//Ток с внутреннего шунта
   GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_7;//ДД
+  GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_7;//Датчик давления
   GPIO_Init(GPIOF, &GPIO_InitStruct);
 
   ADC_CommonInitTypeDef ADC_CommonInitStruct;
@@ -226,9 +183,8 @@ void ADCinit()
 
   ADC_RegularChannelConfig(ADC2, ADC_Channel_8,  1, ADC_SampleTime_480Cycles);
 
-  //Запрос после последней передачи, без него не работает
-  ADC_DMARequestAfterLastTransferCmd(ADC2, ENABLE);
-  ADC_DMARequestAfterLastTransferCmd(ADC3, ENABLE);
+  ADC_DMARequestAfterLastTransferCmd(ADC2, ENABLE);//Запрос после последней передачи,
+  ADC_DMARequestAfterLastTransferCmd(ADC3, ENABLE);//без него не работает
   ADC_DMACmd(ADC2, ENABLE);
   ADC_DMACmd(ADC3, ENABLE);
   ADC_Cmd(ADC2, ENABLE);
@@ -236,7 +192,6 @@ void ADCinit()
   ADC_SoftwareStartConv(ADC2);
   ADC_SoftwareStartConv(ADC3);
 }
-//Настройка модуля CAN.
 void CANinit()
 {
   CAN_DeInit(CAN1);
@@ -262,8 +217,7 @@ void CANinit()
   GPIO_PinAFConfig(GPIOB, GPIO_PinSource5,  GPIO_AF_CAN2);
   GPIO_PinAFConfig(GPIOB, GPIO_PinSource13, GPIO_AF_CAN2);
 
-  //частота шины 42МГц / 24 = 1.75МГц / 7 = 250 кбит/с
-  CAN_InitTypeDef CAN_InitStruct;
+  CAN_InitTypeDef CAN_InitStruct;//Частота шины 42МГц / 24 = 1.75МГц / 7 = 250 кбит/с
   CAN_StructInit(&CAN_InitStruct);
 
   CAN_InitStruct.CAN_ABOM = ENABLE;
@@ -273,8 +227,8 @@ void CANinit()
   CAN_Init(CAN1, &CAN_InitStruct);
   CAN_Init(CAN2, &CAN_InitStruct);
 
-  CAN_SlaveStartBank(0);//задаем номер фильтра, без этого не работает
-  CAN_FilterInitTypeDef CAN_FilterInitStruct;//без фильтра не работает
+  CAN_SlaveStartBank(0);//задаем номер фильтра, без него не работает
+  CAN_FilterInitTypeDef CAN_FilterInitStruct;//без инициализации фильтра не работает
 
   CAN_FilterInitStruct.CAN_FilterIdHigh         = 0;
   CAN_FilterInitStruct.CAN_FilterIdLow          = 0;
@@ -296,10 +250,6 @@ void CANinit()
 
   CAN_ITConfig(CAN2, CAN_IT_FMP0, ENABLE);
 }
-/******************************************************************************
-Настройка TIM2 для отправки по CAN: сообщений - заполнение, ток, частоту, время заполнения в авто управлении, режим работы, процент пропуска верхнего предела тока, шаг частоты в авто управлении, количество выборок на каджой частоте; прерывания по спаду и фронту для обработки с помощью DMA каналов АЦП и чтобы за время прерывания таймера 2 успел заполниться класс фильтра.
-Настройка TIM4 OC1 для ШИМ, прерывание по переполнению.
-******************************************************************************/
 void TIMinit()
 {
   TIM_DeInit(TIM2);
@@ -314,23 +264,23 @@ void TIMinit()
   GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
   GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_AF;
   GPIO_InitStructure.GPIO_Speed = GPIO_Fast_Speed;//Максимальная скорость для работы ШИМ
-  GPIO_Init(GPIOC, &GPIO_InitStructure);//TIM3
-  GPIO_Init(GPIOB, &GPIO_InitStructure);//TIM4
+  GPIO_Init(GPIOC, &GPIO_InitStructure);//TIM3 Дизеринг ШИМ
+  GPIO_Init(GPIOB, &GPIO_InitStructure);//TIM4 Обычный ШИМ
 
   GPIO_PinAFConfig(GPIOC, GPIO_PinSource6, GPIO_AF_TIM3);
   GPIO_PinAFConfig(GPIOB, GPIO_PinSource6, GPIO_AF_TIM4);
 
   TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStruct;
   TIM_TimeBaseStructInit(&TIM_TimeBaseInitStruct);
-  TIM_TimeBaseInitStruct.TIM_Prescaler = 99;//всегда +1
-  TIM_TimeBaseInitStruct.TIM_Period    = 1680;//10 Гц на 50 точек, несущая частота 500 Гц
+  TIM_TimeBaseInitStruct.TIM_Prescaler = 9;//всегда +1
+  TIM_TimeBaseInitStruct.TIM_Period    = 1680;//200 Гц на 25 точек, несущая частота 5 кГц
   TIM_TimeBaseInit(TIM3, &TIM_TimeBaseInitStruct);
 
   TIM_TimeBaseInitStruct.TIM_Prescaler = 839;//всегда +1
   TIM_TimeBaseInitStruct.TIM_Period    = 1000;//100 Gz
   TIM_TimeBaseInit(TIM4, &TIM_TimeBaseInitStruct);
 
-  TIM_TimeBaseInitStruct.TIM_Period    = 100;//1 мс
+  TIM_TimeBaseInitStruct.TIM_Period    = 100;//1 мс для того чтобы отследить синусоиду на 200Гц
   TIM_TimeBaseInit(TIM2, &TIM_TimeBaseInitStruct);
 
   TIM_OCInitTypeDef TIM_OCInitStruct;
@@ -341,13 +291,13 @@ void TIMinit()
   TIM_OC1Init(TIM3, &TIM_OCInitStruct);
   TIM_OC1Init(TIM4, &TIM_OCInitStruct);
 
-  //Настройка TIM2 ОС2 для сканирования АЦП по прерыванию. Настройка GPIOх ненужна
-  TIM_OCInitStruct.TIM_Pulse = 50;//в 2 раза быстрее TIM2
-  TIM_OC2Init(TIM2, &TIM_OCInitStruct);
+  TIM_OCInitStruct.TIM_Pulse = 50;//полупериод
+  TIM_OC2Init(TIM2, &TIM_OCInitStruct);//Для сканирования АЦП по прерыванию. GPIOх ненужно
   TIM_SetCounter(TIM2, 0);
 
   TIM_OC1PreloadConfig(TIM3, TIM_OCPreload_Enable);//разрешает загрузку в CCR1
   TIM_OC1PreloadConfig(TIM4, TIM_OCPreload_Enable);//разрешает загрузку в CCR1
+  TIM_ARRPreloadConfig(TIM3, ENABLE);//разрешает предварительную загрузку в ARR
   TIM_ARRPreloadConfig(TIM4, ENABLE);//разрешает предварительную загрузку в ARR
 
   TIM_ITConfig(TIM2, TIM_IT_Update, ENABLE);//прерывание по переполнению
@@ -363,100 +313,6 @@ void TIMinit()
   TIM_Cmd(TIM4, ENABLE);
 }
 
-bool CanTxMailBox_IsEmpty(CAN_TypeDef* CANx)
-{
-  if((CANx->TSR & CAN_TSR_TME0) == CAN_TSR_TME0 ||
-     (CANx->TSR & CAN_TSR_TME1) == CAN_TSR_TME1 ||
-     (CANx->TSR & CAN_TSR_TME2) == CAN_TSR_TME2)
-    return true;
-  else
-    return false;
-}
-
-void ReinitializeTIM()
-{
-  TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStruct;
-  TIM_TimeBaseStructInit(&TIM_TimeBaseInitStruct);
-  TIM_TimeBaseInitStruct.TIM_Prescaler = 839;//всегда +1
-  TIM_TimeBaseInitStruct.TIM_Period    = freqt / freq;
-  TIM_TimeBaseInit(TIM4, &TIM_TimeBaseInitStruct);
-}
-void SetNextFreq(uint8_t& cnt)
-{
-  //частота увеличивается в условии, при изменении кода быть внимательнее!!!
-  if(cnt == amount && (freq += stepf) <= maxf) 
-  {
-    //без переинициализации сбиваются настройки
-    ReinitializeTIM();
-    count = time * freq;
-    cnt   = 0;
-  }
-  else if(freq > maxf)
-  {
-    freq = minf;
-    m    = idle;
-    cnt  = 0;
-    TIM_SetCompare1(TIM4, 0);
-  }
-}
-void AutoState()
-{
-  static uint16_t i    = 0;
-  static uint8_t  cnt  = 0;
-  static bool     flag = false;
-
-  if(i <= (count - (uint16_t)(count * percent / 100)) && !flag)
-  {
-    TIM_SetCompare1(TIM4, (uint32_t)(i * ((double)(freqt / freq) / count)));
-
-    if(i++ == (count - (uint16_t)(count * percent / 100)))
-      flag = true;
-  }
-  else
-  {
-    TIM_SetCompare1(TIM4, (uint32_t)(--i * ((double)(freqt / freq) / count)));
-
-    if(!i)
-    {
-      flag = false;
-      ++cnt;
-    }
-    SetNextFreq(cnt);
-  }
-}
-void AutoStateMaxCurrent()
-{
-  static uint16_t i     = 0;
-  static bool     flag  = false;
-  static bool     flagm = false;
-  static uint8_t  cnt   = 0;
-
-  if(i <= (uint16_t)(count * 0.1) && !flag)
-  {
-    if(!flagm)
-    {
-      TIM_SetCompare1(TIM4, (uint32_t)(freqt / freq));
-      flagm = true;
-    }
-    if(i++ == (uint16_t)(count * 0.1))
-      flag = true;
-  }
-  else
-  {
-    if(flagm)
-    {
-      TIM_SetCompare1(TIM4, 0);
-      flagm = false;
-    }
-
-    if(!(--i))
-    {
-      flag = false;
-      ++cnt;
-    }
-    SetNextFreq(cnt);
-  }
-}
 void ProportionalSet()
 {
   static uint16_t mycount = 0;
@@ -489,8 +345,7 @@ void StepSetCurrent()
 
 extern "C"
 {
-  //Обработчик привязан к TIM2 OC2. Закидываем значения с АЦП в фильтр.
-  void DMA2_Stream0_IRQHandler()
+  void DMA2_Stream0_IRQHandler()//Обработчик привязан к TIM2 OC2.
   {
     if(DMA_GetITStatus(DMA2_Stream0, DMA_IT_TCIF0))
     {
@@ -501,132 +356,94 @@ extern "C"
       SMPress.push(pressure);
     }
   }
-  void DMA2_Stream2_IRQHandler()
+  void DMA2_Stream2_IRQHandler()//Обработчик привязан к TIM2 OC2.
   {
     if(DMA_GetITStatus(DMA2_Stream2, DMA_IT_TCIF2))
     {
       DMA_ClearITPendingBit(DMA2_Stream2, DMA_IT_TCIF2);
-      CanTxMsg TxMessage;
-      TxMessage.RTR     = CAN_RTR_DATA;
-      TxMessage.IDE     = CAN_ID_STD;
-      TxMessage.DLC     = 2;
-      TxMessage.StdId   = 0x010;
-      TxMessage.Data[0] = static_cast<uint8_t>(ADCDith[0]);
-      TxMessage.Data[1] = static_cast<uint8_t>(ADCDith[0] >> 8);
-      while(!CanTxMailBox_IsEmpty(CAN2));
-      CAN_Transmit(CAN2, &TxMessage);
-      //SMDith.push(ADCDith[0]);
+      SMDith.push(ADCDith[0]);
     }
   }
   /****************************************************************************
   Реализованно 4 режима управления ШИМ сигналом:
   1. Ручной - коэффициент заполнения регулируется с помощью потенциометра.
-  2. Автоматическое пропорциональное управление - заполнение ШИМ за определенное (заданное оператором) время, частота изменяется с заданым шагом и проходит заданое число выборок. Так же есть возможность ограничить верхний предел тока в процентах.
+  2. Авто пропорциональное управление - заполнение ШИМ за определенное время, частота меняется с заданым шагом c заданым числом выборок на каждой. Можно ограничить верхний предел тока в %.
   3. Максимальный ток - выставляется максимальный ток на клапане.
-  4. Автоматическое дискретное управление - выставляется максимальный ток на заданное время, с заданым числом выборок. Частота изменяется с заданым шагом.
+  4. Авто дискретное управление - выставляется максимальный ток на заданное время, с заданым числом выборок. Частота изменяется с заданым шагом.
   ****************************************************************************/
   void TIM4_IRQHandler()
   {
-    TIM_ClearITPendingBit(TIM4, TIM_IT_Update);
-
-    if(m == manual)
-      TIM_SetCompare1(TIM4,(uint32_t)((double)(freqt/freq)*((double)SMFill.get()/4095)));
-    else if(m == auto_p)
-      AutoState();
-    else if(m == max_cur)
-      TIM_SetCompare1(TIM4, (uint32_t)(freqt / freq));
-    else if(m == auto_d)
-      AutoStateMaxCurrent();
-    else if(m == idle);
+    if(TIM_GetITStatus(TIM4, TIM_IT_Update))
+    {
+      TIM_ClearITPendingBit(TIM4, TIM_IT_Update);
+      test.Run(SMFill.get());
+    }
   }
   void TIM3_IRQHandler()
   {
-    TIM_ClearITPendingBit(TIM3, TIM_IT_Update);
-    static uint8_t myc = 0;
-
-    if(!Reverse)
+    if(TIM_GetITStatus(TIM3, TIM_IT_Update))
     {
-      TIM_SetCompare1(TIM3, DTable[myc++]);
-      if(myc == 25)
-        Reverse = true;
-    }
-    else
-    {
-      TIM_SetCompare1(TIM3, DTable[myc-- - 1]);
-      if(myc == 0)
-        Reverse = false;
+      TIM_ClearITPendingBit(TIM3, TIM_IT_Update);
+      test.DitheringSinus();
     }
   }
-  //Для контроля параметров, данные выводятся через CAN.
-  void TIM2_IRQHandler()
+  void TIM2_IRQHandler()//Вывод данных для контроля параметров.
   {
-    TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
-
-    ++time_count;
-
-    CanTxMsg TxMessage;
-    TxMessage.RTR     = CAN_RTR_DATA;
-    TxMessage.IDE     = CAN_ID_STD;
-    TxMessage.DLC     = 8;
-
-    if(!(time_count % 5))
+    if(TIM_GetITStatus(TIM2, TIM_IT_Update))
     {
-      TxMessage.StdId   = 0x002;
-      TxMessage.Data[0] = static_cast<uint8_t>(freq / 10);
-      TxMessage.Data[1] = time;
-      TxMessage.Data[2] = static_cast<uint8_t>(m);
-      TxMessage.Data[3] = percent;
-      TxMessage.Data[4] = stepf;
-      TxMessage.Data[5] = amount;
-      TxMessage.Data[6] = 0;
-      TxMessage.Data[7] = 0;
-      while(!CanTxMailBox_IsEmpty(CAN2));
-      CAN_Transmit(CAN2, &TxMessage);
+      TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
+      ++time_count;
 
-      TxMessage.StdId   = 0x003;
-      TxMessage.Data[0] = static_cast<uint8_t>(SMCurOut.get());
-      TxMessage.Data[1] = static_cast<uint8_t>(SMCurOut.get() >> 8);
-      TxMessage.Data[2] = static_cast<uint8_t>(SMCurIn.get());
-      TxMessage.Data[3] = static_cast<uint8_t>(SMCurIn.get()  >> 8);
-      TxMessage.Data[4] = static_cast<uint8_t>(SMFill.get());
-      TxMessage.Data[5] = static_cast<uint8_t>(SMFill.get()   >> 8);
-      TxMessage.Data[6] = static_cast<uint8_t>(SMPress.get());
-      TxMessage.Data[7] = static_cast<uint8_t>(SMPress.get()  >> 8);
-      while(!CanTxMailBox_IsEmpty(CAN2));
-      CAN_Transmit(CAN2, &TxMessage);
+      CanTxMsg TxMessage;
+      TxMessage.RTR = CAN_RTR_DATA;
+      TxMessage.IDE = CAN_ID_STD;
+      TxMessage.DLC = 8;
 
-      if(PropState)
-        ProportionalSet();
-      if(StepState)
-        StepSetCurrent();
-    }
-    if(!(time_count % 10))
-    {
-      TxMessage.StdId   = 0x004;
-      TxMessage.Data[0] = static_cast<uint8_t>(SMCurOut.get());
-      TxMessage.Data[1] = static_cast<uint8_t>(SMCurOut.get() >> 8);
-      TxMessage.Data[2] = static_cast<uint8_t>(SMCurIn.get());
-      TxMessage.Data[3] = static_cast<uint8_t>(SMCurIn.get()  >> 8);
-      TxMessage.Data[4] = static_cast<uint8_t>(SMFill.get());
-      TxMessage.Data[5] = static_cast<uint8_t>(SMFill.get()   >> 8);
-      TxMessage.Data[6] = static_cast<uint8_t>(SMPress.get());
-      TxMessage.Data[7] = static_cast<uint8_t>(SMPress.get()  >> 8);
-      while(!CanTxMailBox_IsEmpty(CAN2));
-      CAN_Transmit(CAN2, &TxMessage);
-    }
-    if(!(time_count % 20))
-    {
-      TxMessage.StdId   = 0x005;
-      TxMessage.Data[0] = static_cast<uint8_t>(SMCurOut.get());
-      TxMessage.Data[1] = static_cast<uint8_t>(SMCurOut.get() >> 8);
-      TxMessage.Data[2] = static_cast<uint8_t>(SMCurIn.get());
-      TxMessage.Data[3] = static_cast<uint8_t>(SMCurIn.get()  >> 8);
-      TxMessage.Data[4] = static_cast<uint8_t>(SMFill.get());
-      TxMessage.Data[5] = static_cast<uint8_t>(SMFill.get()   >> 8);
-      TxMessage.Data[6] = static_cast<uint8_t>(SMPress.get());
-      TxMessage.Data[7] = static_cast<uint8_t>(SMPress.get()  >> 8);
-      while(!CanTxMailBox_IsEmpty(CAN2));
-      CAN_Transmit(CAN2, &TxMessage);
+      if(!(time_count % 3))//3ms
+      {
+        TxMessage.StdId   = 0x003;
+        TxMessage.Data[0] = static_cast<uint8_t>(SMCurOut.get());
+        TxMessage.Data[1] = static_cast<uint8_t>(SMCurOut.get() >> 8);
+        TxMessage.Data[2] = static_cast<uint8_t>(SMCurIn.get());
+        TxMessage.Data[3] = static_cast<uint8_t>(SMCurIn.get()  >> 8);
+        TxMessage.Data[4] = static_cast<uint8_t>(SMFill.get());
+        TxMessage.Data[5] = static_cast<uint8_t>(SMFill.get()   >> 8);
+        TxMessage.Data[6] = static_cast<uint8_t>(SMPress.get());
+        TxMessage.Data[7] = static_cast<uint8_t>(SMPress.get()  >> 8);
+        while(!CanTxMailBoxIsEmpty(CAN2));
+        CAN_Transmit(CAN2, &TxMessage);
+
+        CanTxMsg TxMessage;
+        TxMessage.RTR     = CAN_RTR_DATA;
+        TxMessage.IDE     = CAN_ID_STD;
+        TxMessage.DLC     = 2;
+        TxMessage.StdId   = 0x005;
+        TxMessage.Data[0] = static_cast<uint8_t>(SMDith.get());
+        TxMessage.Data[1] = static_cast<uint8_t>(SMDith.get() >> 8);
+        while(!CanTxMailBoxIsEmpty(CAN2));
+        CAN_Transmit(CAN2, &TxMessage);
+      }
+      if(!(time_count % 5))//5ms
+      {
+        TxMessage.StdId   = 0x004;
+        TxMessage.Data[0] = static_cast<uint8_t>(SMCurOut.get());
+        TxMessage.Data[1] = static_cast<uint8_t>(SMCurOut.get() >> 8);
+        TxMessage.Data[2] = static_cast<uint8_t>(SMCurIn.get());
+        TxMessage.Data[3] = static_cast<uint8_t>(SMCurIn.get()  >> 8);
+        TxMessage.Data[4] = static_cast<uint8_t>(SMFill.get());
+        TxMessage.Data[5] = static_cast<uint8_t>(SMFill.get()   >> 8);
+        TxMessage.Data[6] = static_cast<uint8_t>(SMPress.get());
+        TxMessage.Data[7] = static_cast<uint8_t>(SMPress.get()  >> 8);
+        while(!CanTxMailBoxIsEmpty(CAN2));
+        CAN_Transmit(CAN2, &TxMessage);
+
+        if(PropState)
+          ProportionalSet();
+        if(StepState)
+          StepSetCurrent();
+      }
+      if(!(time_count % 99))//100ms
+        test.SendMsg();
     }
   }
   //Для взаимодействия с оператором вводится обработка принимаемых сообщений.
@@ -640,22 +457,12 @@ extern "C"
 
       if(RxMessage.StdId == 0x001)
       {
-        freq    = RxMessage.Data[0] * 10;
-        time    = RxMessage.Data[1];
-        m       = static_cast<mode>(RxMessage.Data[2]);
-        percent = RxMessage.Data[3];
-        stepf   = RxMessage.Data[4];
-        amount  = RxMessage.Data[5];
+        test.SetData(RxMessage);
         timecur = RxMessage.Data[6];
-        //без переинициализации сбиваются настройки
-        ReinitializeTIM();
-        count = time * freq;
       }
       else if(RxMessage.StdId == 0x010)
         PropState = true;
       else if(RxMessage.StdId == 0x011)
-        TIM_SetCompare1(TIM4, 0);
-      else if(RxMessage.StdId == 0x012)
         StepState = true;
     }
   }
