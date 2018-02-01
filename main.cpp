@@ -313,7 +313,7 @@ void TIMinit()
   TIM_Cmd(TIM4, ENABLE);
 }
 
-void ProportionalSet()
+/*void ProportionalSet()
 {
   static uint16_t mycount = 0;
   if(mycount != sizeof(Table) / sizeof(*Table))
@@ -323,7 +323,7 @@ void ProportionalSet()
     mycount = 0;
     PropState = false;
   }
-}
+}*/
 void StepSetCurrent()
 {
   static uint16_t mycount = 0;
@@ -384,7 +384,8 @@ extern "C"
     if(TIM_GetITStatus(TIM3, TIM_IT_Update))
     {
       TIM_ClearITPendingBit(TIM3, TIM_IT_Update);
-      test.DitheringSinus();
+      //test.DitheringSinus();
+      test.Dithering();
     }
   }
   void TIM2_IRQHandler()//Вывод данных для контроля параметров.
@@ -437,8 +438,8 @@ extern "C"
         while(!CanTxMailBoxIsEmpty(CAN2));
         CAN_Transmit(CAN2, &TxMessage);
 
-        if(PropState)
-          ProportionalSet();
+        //if(PropState)
+        //  ProportionalSet();
         if(StepState)
           StepSetCurrent();
       }
@@ -460,8 +461,8 @@ extern "C"
         test.SetData(RxMessage);
         timecur = RxMessage.Data[6];
       }
-      else if(RxMessage.StdId == 0x010)
-        PropState = true;
+      //else if(RxMessage.StdId == 0x010)
+      //  PropState = true;
       else if(RxMessage.StdId == 0x011)
         StepState = true;
     }

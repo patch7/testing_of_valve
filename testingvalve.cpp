@@ -2,8 +2,6 @@
 
 void TestingValve::AutoProp()
 {
-  static bool flag = false;
-
   if(!flag)
   {
     TIM_SetCompare1(TIM4, icount * static_cast<double>(freqt / freq) / count);
@@ -23,7 +21,6 @@ void TestingValve::AutoProp()
 }
 void TestingValve::AutoMaxCur()
 {
-  static bool flag  = false;
   static bool flagm = false;
 
   if(!flag)
@@ -121,7 +118,22 @@ void TestingValve::SendMsg() const
 }
 void TestingValve::Dithering()
 {
+  static uint16_t my_icount = 0;
+  const  uint16_t per       = 1680;
+  const  uint16_t points    = 12600;
 
+  if(!flag)
+  {
+    TIM_SetCompare1(TIM3, my_icount * static_cast<double>(per) / points);
+    if(my_icount++ == points)
+      flag = true;
+  }
+  else
+  {
+    TIM_SetCompare1(TIM3, --my_icount * static_cast<double>(per) / points);
+    if(my_icount == 0)
+      flag = false;
+  }
 }
 void TestingValve::DitheringSinus()
 {

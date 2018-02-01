@@ -57,6 +57,7 @@ private:
   uint8_t  amount_cnt     = 0;
 
   bool Reverse = false;
+  bool flag    = false;
 };
 
 inline void TestingValve::Manual(const double fill) const
