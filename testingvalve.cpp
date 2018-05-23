@@ -27,7 +27,7 @@ void TestingValve::AutoMaxCur()
   {
     if(!flagm)
     {
-      TIM_SetCompare1(TIM4, freqt / freq);
+      TIM_SetCompare1(TIM4, 0);
       flagm = true;
     }
     if(icount++ == count / 10)
@@ -37,7 +37,7 @@ void TestingValve::AutoMaxCur()
   {
     if(flagm)
     {
-      TIM_SetCompare1(TIM4, 0);
+      TIM_SetCompare1(TIM4, freqt / freq);
       flagm = false;
     }
     if(--icount == 0)
@@ -50,12 +50,11 @@ void TestingValve::AutoMaxCur()
 }
 void TestingValve::NextFrequency()
 {
-  //частота увеличивается в условии, при изменении кода быть внимательнее!!!
-  if(amount_cnt == amount && (freq += stepf) <= maxf)
+  if(amount_cnt == amount && (freq += stepf) <= maxf)//в условие изменение частоты!!!
   {
-    TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStruct;//без переинициализации сбиваются настройки
+    TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStruct;
     TIM_TimeBaseStructInit(&TIM_TimeBaseInitStruct);
-    TIM_TimeBaseInitStruct.TIM_Prescaler = 839;//всегда +1
+    TIM_TimeBaseInitStruct.TIM_Prescaler = 839;
     TIM_TimeBaseInitStruct.TIM_Period    = freqt / freq;
     TIM_TimeBaseInit(TIM4, &TIM_TimeBaseInitStruct);
     count = time * freq;
@@ -78,15 +77,20 @@ void TestingValve::SetData(CanRxMsg& msg)
   stepf   = msg.Data[4];
   amount  = msg.Data[5];
 
-  TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStruct;//без переинициализации сбиваются настройки
+  TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStruct;
   TIM_TimeBaseStructInit(&TIM_TimeBaseInitStruct);
-  TIM_TimeBaseInitStruct.TIM_Prescaler = 839;//всегда +1
+  TIM_TimeBaseInitStruct.TIM_Prescaler = 839;
   TIM_TimeBaseInitStruct.TIM_Period    = freqt / freq;
   TIM_TimeBaseInit(TIM4, &TIM_TimeBaseInitStruct);
   count = time * freq;
 
   if(m == idle)
+  {
     TIM_SetCompare1(TIM4, 0);
+    amount_cnt = count = icount = 0;
+    freq = minf;
+    flag = false;
+  }
 }
 void TestingValve::Run(const double fill)
 {

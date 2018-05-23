@@ -10,7 +10,6 @@
   Заметки:
   1. Необходимо все таймеры инициализировать в одном месте, для избежания дублирования кода и возможного прерывания до окончания инициализации.
   2. Для настройки тактирования необходимо либо править файл system_stm32f4xx.c, либо явно вызывать функции SystemInit() и SystemCoreClockUpdate() и настраивать тактирование через RCC модуль.
-  3. Для фильтрации сообщений кан по идентификатору есть статейка forum.easyelectronics.ru/viewtopic.php?p=229471
 ******************************************************************************/
 
 #include "stm32f4xx.h"
@@ -23,25 +22,26 @@
 #include "sliding_median.h"
 #include "testingvalve.h"
 
-#define in_current  ADCValue[0]
-#define out_current ADCValue[1]
-#define filling     ADCValue[2]
-#define pressure    ADCValue[3]
+#define pressure    ADCValue[1]
+#define filling     ADCValue[5]
+#define out_current ADCValue[6]
 
-static uint16_t ADCValue[4] = {0};
-static uint16_t ADCDith[1]  = {0};
+#define in_current  ADCPWM[0]
+#define in_CurDith  ADCPWM[4]
 
-SlidingMedian<uint16_t> SMCurIn(7);
-SlidingMedian<uint16_t> SMCurOut(7);
-SlidingMedian<uint16_t> SMFill(7);
-SlidingMedian<uint16_t> SMPress(7);
-SlidingMedian<uint16_t> SMDith(7);
+static uint16_t ADCValue[7] = {0};
+static uint16_t ADCPWM[9]   = {0};
 
-uint32_t time_count = 0;
+static SlidingMedian<uint16_t> SMCurIn(7);
+static SlidingMedian<uint16_t> SMCurOut(7);
+static SlidingMedian<uint16_t> SMFill(7);
+static SlidingMedian<uint16_t> SMPress(7);
+static SlidingMedian<uint16_t> SMDith(7);
 
-TestingValve test;
-uint8_t  timecur = 0;
-bool PropState = false, StepState = false;
+static uint32_t time_count = 0;
+
+static TestingValve test;
+static uint8_t  timecur = 0;
 
 void RccBusConfig();
 void DMAofADCinit();
@@ -96,7 +96,7 @@ void RccBusConfig()//Настройка ядра и всей переферии 
     while(RCC_GetSYSCLKSource() != 8) {}
   }
 }
-void DMAofADCinit()//Настройка модуля DMA2 для автоматической обработки каналов АЦП3
+void DMAofADCinit()//Настройка модуля DMA2 для автоматической обработки каналов АЦП
 {
   DMA_DeInit(DMA2_Stream0);
   DMA_DeInit(DMA2_Stream2);
@@ -107,7 +107,7 @@ void DMAofADCinit()//Настройка модуля DMA2 для автомат�
   DMA_InitStruct.DMA_Channel            = DMA_Channel_2;
   DMA_InitStruct.DMA_PeripheralBaseAddr = (uint32_t)&(ADC3->DR);
   DMA_InitStruct.DMA_Memory0BaseAddr    = (uint32_t)ADCValue;
-  DMA_InitStruct.DMA_BufferSize         = 4;
+  DMA_InitStruct.DMA_BufferSize         = 7;
   DMA_InitStruct.DMA_MemoryInc          = DMA_MemoryInc_Enable;
   DMA_InitStruct.DMA_PeripheralDataSize = DMA_PeripheralDataSize_HalfWord;
   DMA_InitStruct.DMA_MemoryDataSize     = DMA_MemoryDataSize_HalfWord;
@@ -117,14 +117,16 @@ void DMAofADCinit()//Настройка модуля DMA2 для автомат�
 
   DMA_InitStruct.DMA_Channel            = DMA_Channel_1;
   DMA_InitStruct.DMA_PeripheralBaseAddr = (uint32_t)&(ADC2->DR);
-  DMA_InitStruct.DMA_Memory0BaseAddr    = (uint32_t)ADCDith;
-  DMA_InitStruct.DMA_BufferSize         = 1;
+  DMA_InitStruct.DMA_Memory0BaseAddr    = (uint32_t)ADCPWM;
+  DMA_InitStruct.DMA_BufferSize         = 9;
   DMA_Init(DMA2_Stream2, &DMA_InitStruct);
 
-  DMA_ITConfig(DMA2_Stream0, DMA_IT_TC, ENABLE);//если прерывание ненадо, можно ли убрать
-  DMA_ITConfig(DMA2_Stream2, DMA_IT_TC, ENABLE);//если прерывание ненадо, можно ли убрать
+  DMA_ITConfig(DMA2_Stream0, DMA_IT_TC, ENABLE);
+  DMA_ITConfig(DMA2_Stream2, DMA_IT_TC, ENABLE);
+  DMA_Cmd(DMA2_Stream0, ENABLE);
+  DMA_Cmd(DMA2_Stream2, ENABLE);
 
-  NVIC_InitTypeDef NVIC_InitStruct;//Настройка прерывания, без него не работает!
+  NVIC_InitTypeDef NVIC_InitStruct;
   NVIC_InitStruct.NVIC_IRQChannel                   = DMA2_Stream0_IRQn;
   NVIC_InitStruct.NVIC_IRQChannelPreemptionPriority = 0x0;
   NVIC_InitStruct.NVIC_IRQChannelSubPriority        = 0x0;
@@ -133,11 +135,8 @@ void DMAofADCinit()//Настройка модуля DMA2 для автомат�
 
   NVIC_InitStruct.NVIC_IRQChannel                   = DMA2_Stream2_IRQn;
   NVIC_Init(&NVIC_InitStruct);
-
-  DMA_Cmd(DMA2_Stream0, ENABLE);
-  DMA_Cmd(DMA2_Stream2, ENABLE);
 }
-void ADCinit()//Настройка АЦП2 и АЦП3, преобразование по таймеру 2 по спаду и нарастанию ШИМ
+void ADCinit()//Настройка АЦП2 и АЦП3, преобразование по таймеру 2
 {
   ADC_DeInit();
   RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC2, ENABLE);
@@ -145,19 +144,19 @@ void ADCinit()//Настройка АЦП2 и АЦП3, преобразован�
 
   GPIO_InitTypeDef GPIO_InitStruct;
   GPIO_StructInit(&GPIO_InitStruct);
-
-  GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_0 | GPIO_Pin_1;//Ручное заполнение и ток с внешнего шунта
+  //                           current in
+  GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_1 | GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_7;
   GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_AN;
   GPIO_InitStruct.GPIO_Speed = GPIO_High_Speed;
-  GPIO_Init(GPIOC, &GPIO_InitStruct);
-
-  GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_0;//Ток с дизерингом
-  GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_1;//Ток с внутреннего шунта
   GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_7;//Датчик давления
+  //                          current dith
+  GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_0;
+  GPIO_Init(GPIOB, &GPIO_InitStruct);
+  //                             manual     curent out
+  GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_0 | GPIO_Pin_1 | GPIO_Pin_2 | GPIO_Pin_3 | GPIO_Pin_4 | GPIO_Pin_5;
+  GPIO_Init(GPIOC, &GPIO_InitStruct);
+  //                                         pressure
+  GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_6 | GPIO_Pin_7 | GPIO_Pin_8 | GPIO_Pin_9 | GPIO_Pin_10;
   GPIO_Init(GPIOF, &GPIO_InitStruct);
 
   ADC_CommonInitTypeDef ADC_CommonInitStruct;
@@ -170,27 +169,41 @@ void ADCinit()//Настройка АЦП2 и АЦП3, преобразован�
   ADC_InitStruct.ADC_ScanConvMode         = ENABLE;
   ADC_InitStruct.ADC_ExternalTrigConv     = ADC_ExternalTrigConv_T2_CC2;
   ADC_InitStruct.ADC_ExternalTrigConvEdge = ADC_ExternalTrigConvEdge_RisingFalling;
-  ADC_InitStruct.ADC_NbrOfConversion      = 4;
+  ADC_InitStruct.ADC_NbrOfConversion      = 7;
   ADC_Init(ADC3, &ADC_InitStruct);
 
-  ADC_InitStruct.ADC_NbrOfConversion      = 1;
+  ADC_InitStruct.ADC_NbrOfConversion      = 9;
   ADC_Init(ADC2, &ADC_InitStruct);
 
-  ADC_RegularChannelConfig(ADC3, ADC_Channel_1,  1, ADC_SampleTime_480Cycles);
-  ADC_RegularChannelConfig(ADC3, ADC_Channel_10, 2, ADC_SampleTime_480Cycles);
-  ADC_RegularChannelConfig(ADC3, ADC_Channel_11, 3, ADC_SampleTime_480Cycles);
-  ADC_RegularChannelConfig(ADC3, ADC_Channel_5,  4, ADC_SampleTime_480Cycles);
+  ADC_RegularChannelConfig(ADC3, ADC_Channel_4,  1, ADC_SampleTime_480Cycles);//
+  ADC_RegularChannelConfig(ADC3, ADC_Channel_5,  2, ADC_SampleTime_480Cycles);//pressure
+  ADC_RegularChannelConfig(ADC3, ADC_Channel_6,  3, ADC_SampleTime_480Cycles);//
+  ADC_RegularChannelConfig(ADC3, ADC_Channel_7,  4, ADC_SampleTime_480Cycles);//
+  ADC_RegularChannelConfig(ADC3, ADC_Channel_8,  5, ADC_SampleTime_480Cycles);//
+  ADC_RegularChannelConfig(ADC3, ADC_Channel_10, 6, ADC_SampleTime_480Cycles);//manual
+  ADC_RegularChannelConfig(ADC3, ADC_Channel_11, 7, ADC_SampleTime_480Cycles);//current out
 
-  ADC_RegularChannelConfig(ADC2, ADC_Channel_8,  1, ADC_SampleTime_480Cycles);
+  ADC_RegularChannelConfig(ADC2, ADC_Channel_1,  1, ADC_SampleTime_480Cycles);//current in
+  ADC_RegularChannelConfig(ADC2, ADC_Channel_4,  2, ADC_SampleTime_480Cycles);//
+  ADC_RegularChannelConfig(ADC2, ADC_Channel_13, 3, ADC_SampleTime_480Cycles);//
+  ADC_RegularChannelConfig(ADC2, ADC_Channel_12, 4, ADC_SampleTime_480Cycles);//
+  ADC_RegularChannelConfig(ADC2, ADC_Channel_8,  5, ADC_SampleTime_480Cycles);//curren dithering
+  ADC_RegularChannelConfig(ADC2, ADC_Channel_7,  6, ADC_SampleTime_480Cycles);//
+  ADC_RegularChannelConfig(ADC2, ADC_Channel_5,  7, ADC_SampleTime_480Cycles);//
+  ADC_RegularChannelConfig(ADC2, ADC_Channel_15, 8, ADC_SampleTime_480Cycles);//
+  ADC_RegularChannelConfig(ADC2, ADC_Channel_14, 9, ADC_SampleTime_480Cycles);//
 
-  ADC_DMARequestAfterLastTransferCmd(ADC2, ENABLE);//Запрос после последней передачи,
-  ADC_DMARequestAfterLastTransferCmd(ADC3, ENABLE);//без него не работает
-  ADC_DMACmd(ADC2, ENABLE);
+  ADC_DMARequestAfterLastTransferCmd(ADC3, ENABLE);
+  ADC_DMARequestAfterLastTransferCmd(ADC2, ENABLE);
+
   ADC_DMACmd(ADC3, ENABLE);
-  ADC_Cmd(ADC2, ENABLE);
+  ADC_DMACmd(ADC2, ENABLE);
+
   ADC_Cmd(ADC3, ENABLE);
-  ADC_SoftwareStartConv(ADC2);
+  ADC_Cmd(ADC2, ENABLE);
+
   ADC_SoftwareStartConv(ADC3);
+  ADC_SoftwareStartConv(ADC2);
 }
 void CANinit()
 {
@@ -227,8 +240,8 @@ void CANinit()
   CAN_Init(CAN1, &CAN_InitStruct);
   CAN_Init(CAN2, &CAN_InitStruct);
 
-  CAN_SlaveStartBank(0);//задаем номер фильтра, без него не работает
-  CAN_FilterInitTypeDef CAN_FilterInitStruct;//без инициализации фильтра не работает
+  CAN_SlaveStartBank(0);//номер фильтра
+  CAN_FilterInitTypeDef CAN_FilterInitStruct;
 
   CAN_FilterInitStruct.CAN_FilterIdHigh         = 0;
   CAN_FilterInitStruct.CAN_FilterIdLow          = 0;
@@ -263,7 +276,7 @@ void TIMinit()
   GPIO_InitStructure.GPIO_Pin   = GPIO_Pin_6;
   GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
   GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_AF;
-  GPIO_InitStructure.GPIO_Speed = GPIO_Fast_Speed;//Максимальная скорость для работы ШИМ
+  GPIO_InitStructure.GPIO_Speed = GPIO_Fast_Speed;
   GPIO_Init(GPIOC, &GPIO_InitStructure);//TIM3 Дизеринг ШИМ
   GPIO_Init(GPIOB, &GPIO_InitStructure);//TIM4 Обычный ШИМ
 
@@ -272,15 +285,15 @@ void TIMinit()
 
   TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStruct;
   TIM_TimeBaseStructInit(&TIM_TimeBaseInitStruct);
-  TIM_TimeBaseInitStruct.TIM_Prescaler = 9;//всегда +1
-  TIM_TimeBaseInitStruct.TIM_Period    = 1680;//200 Гц на 25 точек, несущая частота 5 кГц
+  TIM_TimeBaseInitStruct.TIM_Prescaler = 9;
+  TIM_TimeBaseInitStruct.TIM_Period    = 1680;//200 Гц на 25 точек, несущая 5 кГц
   TIM_TimeBaseInit(TIM3, &TIM_TimeBaseInitStruct);
 
-  TIM_TimeBaseInitStruct.TIM_Prescaler = 839;//всегда +1
+  TIM_TimeBaseInitStruct.TIM_Prescaler = 839;
   TIM_TimeBaseInitStruct.TIM_Period    = 1000;//100 Gz
   TIM_TimeBaseInit(TIM4, &TIM_TimeBaseInitStruct);
 
-  TIM_TimeBaseInitStruct.TIM_Period    = 100;//1 мс для того чтобы отследить синусоиду на 200Гц
+  TIM_TimeBaseInitStruct.TIM_Period    = 100;//1 мс
   TIM_TimeBaseInit(TIM2, &TIM_TimeBaseInitStruct);
 
   TIM_OCInitTypeDef TIM_OCInitStruct;
@@ -291,18 +304,18 @@ void TIMinit()
   TIM_OC1Init(TIM3, &TIM_OCInitStruct);
   TIM_OC1Init(TIM4, &TIM_OCInitStruct);
 
-  TIM_OCInitStruct.TIM_Pulse = 50;//полупериод
-  TIM_OC2Init(TIM2, &TIM_OCInitStruct);//Для сканирования АЦП по прерыванию. GPIOх ненужно
+  TIM_OCInitStruct.TIM_Pulse = 50;
+  TIM_OC2Init(TIM2, &TIM_OCInitStruct);//Сканирования АЦП по прерыванию
   TIM_SetCounter(TIM2, 0);
 
-  TIM_OC1PreloadConfig(TIM3, TIM_OCPreload_Enable);//разрешает загрузку в CCR1
-  TIM_OC1PreloadConfig(TIM4, TIM_OCPreload_Enable);//разрешает загрузку в CCR1
-  TIM_ARRPreloadConfig(TIM3, ENABLE);//разрешает предварительную загрузку в ARR
-  TIM_ARRPreloadConfig(TIM4, ENABLE);//разрешает предварительную загрузку в ARR
+  TIM_OC1PreloadConfig(TIM3, TIM_OCPreload_Enable);
+  TIM_OC1PreloadConfig(TIM4, TIM_OCPreload_Enable);
+  TIM_ARRPreloadConfig(TIM3, ENABLE);
+  TIM_ARRPreloadConfig(TIM4, ENABLE);
 
-  TIM_ITConfig(TIM2, TIM_IT_Update, ENABLE);//прерывание по переполнению
-  TIM_ITConfig(TIM3, TIM_IT_Update, ENABLE);//прерывание по переполнению
-  TIM_ITConfig(TIM4, TIM_IT_Update, ENABLE);//прерывание по переполнению
+  TIM_ITConfig(TIM2, TIM_IT_Update, ENABLE);
+  TIM_ITConfig(TIM3, TIM_IT_Update, ENABLE);
+  TIM_ITConfig(TIM4, TIM_IT_Update, ENABLE);
 
   NVIC_EnableIRQ(TIM2_IRQn);
   NVIC_EnableIRQ(TIM3_IRQn);
@@ -313,35 +326,6 @@ void TIMinit()
   TIM_Cmd(TIM4, ENABLE);
 }
 
-/*void ProportionalSet()
-{
-  static uint16_t mycount = 0;
-  if(mycount != sizeof(Table) / sizeof(*Table))
-    TIM_SetCompare1(TIM4, Table[mycount++]);
-  else
-  {
-    mycount = 0;
-    PropState = false;
-  }
-}*/
-void StepSetCurrent()
-{
-  static uint16_t mycount = 0;
-  static uint16_t pwm = 8;
-  if(!(mycount % (20 + (20 * timecur))))
-  {
-    TIM_SetCompare1(TIM4, pwm);
-    pwm += 8;
-  }
-  if(mycount == 2520*(timecur+1))
-  {
-    mycount = 0;
-    pwm = 8;
-    StepState = false;
-  }
-  ++mycount;
-}
-
 
 extern "C"
 {
@@ -350,10 +334,9 @@ extern "C"
     if(DMA_GetITStatus(DMA2_Stream0, DMA_IT_TCIF0))
     {
       DMA_ClearITPendingBit(DMA2_Stream0, DMA_IT_TCIF0);
-      SMCurIn.push(in_current);
-      SMCurOut.push(out_current);
-      SMFill.push(filling);
       SMPress.push(pressure);
+      SMFill.push(filling);
+      SMCurOut.push(out_current);
     }
   }
   void DMA2_Stream2_IRQHandler()//Обработчик привязан к TIM2 OC2.
@@ -361,7 +344,8 @@ extern "C"
     if(DMA_GetITStatus(DMA2_Stream2, DMA_IT_TCIF2))
     {
       DMA_ClearITPendingBit(DMA2_Stream2, DMA_IT_TCIF2);
-      SMDith.push(ADCDith[0]);
+      SMCurIn.push(in_current);
+      SMDith.push(in_CurDith);
     }
   }
   /****************************************************************************
@@ -385,10 +369,10 @@ extern "C"
     {
       TIM_ClearITPendingBit(TIM3, TIM_IT_Update);
       //test.DitheringSinus();
-      test.Dithering();
+      //test.Dithering();
     }
   }
-  void TIM2_IRQHandler()//Вывод данных для контроля параметров.
+  void TIM2_IRQHandler()//Вывод данных
   {
     if(TIM_GetITStatus(TIM2, TIM_IT_Update))
     {
@@ -400,7 +384,7 @@ extern "C"
       TxMessage.IDE = CAN_ID_STD;
       TxMessage.DLC = 8;
 
-      if(!(time_count % 3))//3ms
+      if(!(time_count % 5))//5ms
       {
         TxMessage.StdId   = 0x003;
         TxMessage.Data[0] = static_cast<uint8_t>(SMCurOut.get());
@@ -414,41 +398,20 @@ extern "C"
         while(!CanTxMailBoxIsEmpty(CAN2));
         CAN_Transmit(CAN2, &TxMessage);
 
-        CanTxMsg TxMessage;
-        TxMessage.RTR     = CAN_RTR_DATA;
-        TxMessage.IDE     = CAN_ID_STD;
-        TxMessage.DLC     = 2;
-        TxMessage.StdId   = 0x005;
-        TxMessage.Data[0] = static_cast<uint8_t>(SMDith.get());
-        TxMessage.Data[1] = static_cast<uint8_t>(SMDith.get() >> 8);
-        while(!CanTxMailBoxIsEmpty(CAN2));
-        CAN_Transmit(CAN2, &TxMessage);
-      }
-      if(!(time_count % 5))//5ms
-      {
+        TxMessage.DLC     = 4;
         TxMessage.StdId   = 0x004;
-        TxMessage.Data[0] = static_cast<uint8_t>(SMCurOut.get());
-        TxMessage.Data[1] = static_cast<uint8_t>(SMCurOut.get() >> 8);
-        TxMessage.Data[2] = static_cast<uint8_t>(SMCurIn.get());
-        TxMessage.Data[3] = static_cast<uint8_t>(SMCurIn.get()  >> 8);
-        TxMessage.Data[4] = static_cast<uint8_t>(SMFill.get());
-        TxMessage.Data[5] = static_cast<uint8_t>(SMFill.get()   >> 8);
-        TxMessage.Data[6] = static_cast<uint8_t>(SMPress.get());
-        TxMessage.Data[7] = static_cast<uint8_t>(SMPress.get()  >> 8);
+        TxMessage.Data[0] = static_cast<uint8_t>(filling);
+        TxMessage.Data[1] = static_cast<uint8_t>(filling >> 8);
+        TxMessage.Data[2] = static_cast<uint8_t>(pressure);
+        TxMessage.Data[3] = static_cast<uint8_t>(pressure >> 8);
         while(!CanTxMailBoxIsEmpty(CAN2));
         CAN_Transmit(CAN2, &TxMessage);
-
-        //if(PropState)
-        //  ProportionalSet();
-        if(StepState)
-          StepSetCurrent();
       }
       if(!(time_count % 99))//100ms
         test.SendMsg();
     }
   }
-  //Для взаимодействия с оператором вводится обработка принимаемых сообщений.
-  void CAN2_RX0_IRQHandler(void)
+  void CAN2_RX0_IRQHandler(void)//обработка запроса оператора
   {
     if (CAN_GetITStatus(CAN2, CAN_IT_FMP0))
     {
@@ -461,10 +424,6 @@ extern "C"
         test.SetData(RxMessage);
         timecur = RxMessage.Data[6];
       }
-      //else if(RxMessage.StdId == 0x010)
-      //  PropState = true;
-      else if(RxMessage.StdId == 0x011)
-        StepState = true;
     }
   }
 }

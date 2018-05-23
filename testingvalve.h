@@ -2,12 +2,12 @@
 #define __TESTINGVALVE
 
 #include "stm32f4xx.h"
-//#include "stm32f4xx_gpio.h"
-//#include "stm32f4xx_adc.h"
-//#include "stm32f4xx_rcc.h"
-//#include "stm32f4xx_can.h"
-//#include "stm32f4xx_dma.h"
-//#include "stm32f4xx_tim.h"
+#include "stm32f4xx_gpio.h"
+#include "stm32f4xx_adc.h"
+#include "stm32f4xx_rcc.h"
+#include "stm32f4xx_can.h"
+#include "stm32f4xx_dma.h"
+#include "stm32f4xx_tim.h"
 
 class TestingValve
 {
@@ -34,8 +34,6 @@ private:
   void AutoMaxCur();
   void NextFrequency();
 
-  mode m;
-
   const uint32_t freqt = 100000;
   const uint16_t bit12 = 4095;
   const uint16_t maxf  = 400;
@@ -55,6 +53,8 @@ private:
 
   uint8_t  dith_sin_count = 0;
   uint8_t  amount_cnt     = 0;
+
+  mode m;
 
   bool Reverse = false;
   bool flag    = false;
